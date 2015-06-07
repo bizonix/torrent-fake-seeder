@@ -16,6 +16,11 @@ class Seeder
     private $events = [];
 
     /**
+     * @var array
+     */
+    protected $announce = [];
+
+    /**
      * @var Client
      */
     protected $client;
@@ -62,14 +67,15 @@ class Seeder
         $this->torrent = $torrent;
         $this->speed   = $speed;
         $this->refresh = $refresh;
-
         $this->port = rand(30000, 60000);
+
+        $this->validAnnounceList();
     }
 
     /**
      * Seed the torrent
      */
-    public function seed()
+    public function seed($done)
     {
         $this->uploaded = 0;
         $time           = time();
@@ -82,7 +88,7 @@ class Seeder
             ]);
         }
 
-        while (true) {
+        while ($done >= $this->uploaded) {
             sleep($this->refresh);
 
             $now         = time();
@@ -91,22 +97,41 @@ class Seeder
             $this->uploaded += (($now - $time) * $randomSpeed * 1024 * 1024);
 
             $time = $now;
-            $url  = $this->getUrl($this->uploaded, null);
+            foreach($this->getUrls($this->uploaded, null) as $url){
+                try {
+                    $this->send($url);
+                    $this->trigger('update', [
+                        'uploaded' => $this->uploaded,
+                        'speed'    => $randomSpeed,
+                    ]);
+                } catch (SendFailException $sfe) {
+                    $this->trigger('error', [
+                        'exception' => $sfe,
+                    ]);
+                }
+            }
+        }
+        $this->stop($this->uploaded);
+    }
 
-            try {
-                $this->send($url);
-                $this->trigger('update', [
-                    'uploaded' => ($this->uploaded / 1024 / 1024),
-                    'speed'    => $randomSpeed,
-                ]);
-            } catch (SendFailException $sfe) {
-                $this->trigger('error', [
-                    'exception' => $sfe,
-                ]);
+    protected function validAnnounceList()
+    {
+        foreach($this->torrent->announce() as $announce){
+            $announce = reset($announce);
+            $host = parse_url($announce, PHP_URL_HOST);
+            if(in_array($host,array('retracker.local'))){
+                continue;
+            }
+            $ip = gethostbyname($host);
+            if($ip !== $host){
+                $this->announce[]=$announce;
             }
         }
     }
-
+    protected function getAnnounceList()
+    {
+        return $this->announce;
+    }
     /**
      * Return a random speed based on speed that the user provide
      * It returns a float between speed - 15% and speed + 10%
@@ -141,37 +166,50 @@ class Seeder
      */
     protected function start()
     {
-        $url = $this->getUrl();
-
-        $this->send($url);
+        foreach($this->getUrls() as $url){
+            $this->send($url);
+        }
+    }
+    /**
+     * Send the "started" query
+     */
+    protected function stop($uploaded)
+    {
+        foreach($this->getUrls($uploaded,'stopped') as $url){
+            $this->send($url);
+        }
     }
 
     /**
      * Return a formatted url
      *
      * @param int    $uploaded
-     * @param string $event
+     * @param string $event  started | completed | stopped
      *
      * @return string
      */
-    protected function getUrl($uploaded = 0, $event = 'started')
+    protected function getUrls($uploaded = 0, $event = 'started')
     {
-        return $this->torrent->announce()
-        . '?info_hash=' . urlencode(pack('H*', $this->torrent->hash_info()))
-        . '&peer_id=' . $this->client->getPeerId()
-        . '&key=' . $this->client->getKey()
-        . '&supportcrypto=1'
-        . '&port=' . $this->port
-        . '&azudp=' . ($this->port + 1)
-        . '&uploaded=' . $uploaded
-        . '&downloaded=0'
-        . '&left=0'
-        . '&corrupt=0'
-        . '&numwant=0'
-        . '&no_peer_id=1'
-        . '&compact=1'
-        . '&azver=3'
-        . (null != $event ? '&event=' . $event : '');
+        $urls = [];
+        foreach ($this->getAnnounceList() as $announce)
+        {
+            $urls[] = $announce
+            . (false != strpos($announce,'?') ? '&' : '?' )
+            . 'info_hash=' . urlencode(pack('H*', $this->torrent->hash_info()))
+            . '&peer_id=' . $this->client->getPeerId()
+            . '&key=' . $this->client->getKey()
+            . '&supportcrypto=1'
+            . '&port=' . $this->port
+            . '&uploaded=' . $uploaded
+            . '&downloaded=0'
+            . '&left=0'
+            . '&corrupt=0'
+            . '&numwant=0'
+            . '&no_peer_id=1'
+            . '&compact=1'
+            . (null != $event ? '&event=' . $event : '');
+        }
+        return $urls;
     }
 
     /**
